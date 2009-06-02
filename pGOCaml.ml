@@ -791,89 +791,88 @@ let prepare conn ~query ?(name = "") ?(types = []) () =
   let details = [ "query"; query; "name"; name ] in
   profile_op conn.uuid "prepare" details do_prepare
 
-let execute conn ?(name = "") ?(portal = "") ~params () =
-  let do_execute () =
-    (* Bind *)
-    let msg = new_message 'B' in
-    add_string msg portal;
-    add_string msg name;
-    add_int16 msg 0; (* Send all parameters as text. *)
-    add_int16 msg (List.length params);
-    List.iter (
-      fun param ->
-	match param with
-	| None -> add_int32 msg 0xffff_ffffl (* NULL *)
-	| Some str ->
-	    add_int32 msg (Int32.of_int (String.length str));
-	    add_string_no_trailing_nil msg str
-    ) params;
-    add_int16 msg 0; (* Send back all results as text. *)
-    send_message conn msg;
+let do_execute conn name portal params rev () =
+  (* Bind *)
+  let msg = new_message 'B' in
+  add_string msg portal;
+  add_string msg name;
+  add_int16 msg 0; (* Send all parameters as text. *)
+  add_int16 msg (List.length params);
+  List.iter (
+    fun param ->
+      match param with
+      | None -> add_int32 msg 0xffff_ffffl (* NULL *)
+      | Some str ->
+	  add_int32 msg (Int32.of_int (String.length str));
+	  add_string_no_trailing_nil msg str
+  ) params;
+  add_int16 msg 0; (* Send back all results as text. *)
+  send_message conn msg;
 
-    (* Execute *)
-    let msg = new_message 'E' in
-    add_string msg portal;
-    add_int32 msg 0l; (* no limit on rows *)
-    send_message conn msg;
+  (* Execute *)
+  let msg = new_message 'E' in
+  add_string msg portal;
+  add_int32 msg 0l; (* no limit on rows *)
+  send_message conn msg;
 
-    (* Sync *)
-    let msg = new_message 'S' in
-    send_message conn msg;
+  (* Sync *)
+  let msg = new_message 'S' in
+  send_message conn msg;
 
-    (* Process the message(s) received from the database until we read
-     * ReadyForQuery.  In the process we may get some rows back from
-     * the database, no data, or an error.
-     *)
-    let rows = ref [] in
-    let rec loop () =
-      (* NB: receive_message flushes the output connection. *)
-      let msg = receive_message conn in
-      let msg = parse_backend_message msg in
-      match msg with
-      | ReadyForQuery _ -> () (* Finished! *)
-      | ErrorResponse err -> pg_error ~conn err (* Error *)
-      | NoticeResponse err ->
-	  (* XXX Do or print something here? *)
-	  loop ()
-      | BindComplete -> loop ()
-      | CommandComplete _ -> loop ()
-      | EmptyQueryResponse -> loop ()
-      | DataRow fields ->
-	  let fields = List.map (
-	    function
-	    | (i, _) when i < 0 -> None (* NULL *)
-	    | (0, _) -> Some ""
-	    | (i, bytes) -> Some bytes
-	  ) fields in
-	  rows := fields :: !rows;
-	  loop ()
-      | NoData -> loop ()
-      | ParameterStatus _ ->
-	  (* 43.2.6: ParameterStatus messages will be generated whenever
-	   * the active value changes for any of the parameters the backend
-	   * believes the frontend should know about. Most commonly this
-	   * occurs in response to a SET SQL command executed by the
-	   * frontend, and this case is effectively synchronous -- but it
-	   * is also possible for parameter status changes to occur because
-	   * the administrator changed a configuration file and then sent
-	   * the SIGHUP signal to the postmaster.
-	   *)
-	  loop ()
-      | _ ->
-	  raise
-	    (Error ("PGOCaml: unknown response message: " ^
-		      string_of_msg_t msg))
-    in
-    loop ();
-
-    (* Return the result rows. *)
-    List.rev !rows
-  in
-  (* We used to append the parameters here, but that leads to
-   * problems with parsing, and may leak sensitive data.  In any
-   * case the profiling program doesn't care about the actual
-   * parameters.
+  (* Process the message(s) received from the database until we read
+   * ReadyForQuery.  In the process we may get some rows back from
+   * the database, no data, or an error.
    *)
+  let rows = ref [] in
+  let rec loop () =
+    (* NB: receive_message flushes the output connection. *)
+    let msg = receive_message conn in
+    let msg = parse_backend_message msg in
+    match msg with
+    | ReadyForQuery _ -> () (* Finished! *)
+    | ErrorResponse err -> pg_error ~conn err (* Error *)
+    | NoticeResponse err ->
+	(* XXX Do or print something here? *)
+	loop ()
+    | BindComplete -> loop ()
+    | CommandComplete _ -> loop ()
+    | EmptyQueryResponse -> loop ()
+    | DataRow fields ->
+	let fields = List.map (
+	  function
+	  | (i, _) when i < 0 -> None (* NULL *)
+	  | (0, _) -> Some ""
+	  | (i, bytes) -> Some bytes
+	) fields in
+	rows := fields :: !rows;
+	loop ()
+    | NoData -> loop ()
+    | ParameterStatus _ ->
+	(* 43.2.6: ParameterStatus messages will be generated whenever
+	 * the active value changes for any of the parameters the backend
+	 * believes the frontend should know about. Most commonly this
+	 * occurs in response to a SET SQL command executed by the
+	 * frontend, and this case is effectively synchronous -- but it
+	 * is also possible for parameter status changes to occur because
+	 * the administrator changed a configuration file and then sent
+	 * the SIGHUP signal to the postmaster.
+	 *)
+	loop ()
+    | _ ->
+	raise
+	  (Error ("PGOCaml: unknown response message: " ^
+		    string_of_msg_t msg))
+  in
+  loop ();
+  if rev then List.rev !rows else !rows
+
+let execute_rev conn ?(name = "") ?(portal = "") ~params () =
+  let do_execute = do_execute conn name portal params false in
+  let details = [ "name"; name; "portal"; portal ] in
+  profile_op conn.uuid "execute" details do_execute
+
+let execute conn ?(name = "") ?(portal = "") ~params () =
+  let do_execute = do_execute conn name portal params true in
   let details = [ "name"; name; "portal"; portal ] in
   profile_op conn.uuid "execute" details do_execute
 

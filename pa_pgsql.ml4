@@ -293,7 +293,7 @@ let pgsql_expand ?(flags = []) loc dbh query =
 	}
         else ();
 	(* Execute the statement, returning the rows. *)
-	PGOCaml.execute dbh ~name ~params ()
+	PGOCaml.execute_rev dbh ~name ~params ()
       }
     >> in
 
@@ -358,7 +358,7 @@ let pgsql_expand ?(flags = []) loc dbh query =
       <:expr<
 	let rows = $expr$ in
 	let original_query = $str:query$ in
-	List.map (
+	List.rev_map (
 	  fun row ->
 	    match row with
 	      [ $list$ -> $convert$
