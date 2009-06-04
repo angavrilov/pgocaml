@@ -1049,6 +1049,7 @@ let name_of_type ?modifier = function
   | 21_l -> "int16"			(* INT2 *)
   | 23_l -> "int32"			(* INT4 *)
   | 25_l -> "string"			(* TEXT *)
+  | 600_l -> "point"			(* POINT *)
   | 700_l | 701_l -> "float"		(* FLOAT4, FLOAT8 *)
   | 1007_l -> "int32_array"		(* INT4[] *)
   | 1042_l -> "string"			(* CHAR(n) - treat as string *)
@@ -1076,10 +1077,9 @@ let name_of_type ?modifier = function
       raise (Error ("PGOCaml: unknown type for OID " ^ Int32.to_string i))
 
 type timestamptz = Calendar.t * Time_Zone.t
-
 type int16 = int
 type bytea = string
-
+type point = float * float
 type int32_array = int32 array
 
 let string_of_oid = Int32.to_string
@@ -1091,6 +1091,7 @@ let string_of_int16 = Pervasives.string_of_int
 let string_of_int32 = Int32.to_string
 let string_of_int64 = Int64.to_string
 let string_of_float = string_of_float
+let string_of_point (x, y) = "(" ^ (string_of_float x) ^ "," ^ (string_of_float y) ^ ")"
 let string_of_timestamp = Printer.CalendarPrinter.to_string
 let string_of_timestamptz (cal, tz) =
   Printer.CalendarPrinter.to_string cal ^
@@ -1108,7 +1109,6 @@ let string_of_time = Printer.TimePrinter.to_string
 let string_of_interval p =
   let y, m, d, s = Calendar.Period.ymds p in
   sprintf "%d years %d mons %d days %d seconds" y m d s
-
 let string_of_unit () = ""
 
 (* NB. It is the responsibility of the caller of this function to
@@ -1155,6 +1155,18 @@ let int16_of_string = Pervasives.int_of_string
 let int32_of_string = Int32.of_string
 let int64_of_string = Int64.of_string
 let float_of_string = float_of_string
+
+let point_of_string =
+  let float_pat = "[+-]?[0-9]+.*[0-9]*|[Nn]a[Nn]|[+-]?[Ii]nfinity" in
+  let point_pat = "\\([ \t]*(" ^ float_pat ^ ")[ \t]*,[ \t]*(" ^ float_pat ^ ")[ \t]*\\)" in
+  let rex = Pcre.regexp point_pat
+  in fun str ->
+    try
+      let res = Pcre.extract ~rex ~full_match:false str
+      in ((float_of_string res.(0)), (float_of_string res.(1)))
+    with
+      | _ -> failwith "point_of_string"
+
 let date_of_string = Printer.DatePrinter.from_string
 
 let time_of_string str =

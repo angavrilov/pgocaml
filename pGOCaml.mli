@@ -198,10 +198,9 @@ val name_of_type : ?modifier:int32 -> oid -> string
   *)
 
 type timestamptz = Calendar.t * Time_Zone.t
-
 type int16 = int
 type bytea = string (* XXX *)
-
+type point = float * float
 type int32_array = int32 array
 
 val string_of_oid : oid -> string
@@ -211,6 +210,7 @@ val string_of_int16 : int16 -> string
 val string_of_int32 : int32 -> string
 val string_of_int64 : int64 -> string
 val string_of_float : float -> string
+val string_of_point : point -> string
 val string_of_timestamp : Calendar.t -> string
 val string_of_timestamptz : timestamptz -> string
 val string_of_date : Date.t -> string
@@ -227,6 +227,7 @@ val int16_of_string : string -> int16
 val int32_of_string : string -> int32
 val int64_of_string : string -> int64
 val float_of_string : string -> float
+val point_of_string : string -> point
 val timestamp_of_string : string -> Calendar.t
 val timestamptz_of_string : string -> timestamptz
 val date_of_string : string -> Date.t
