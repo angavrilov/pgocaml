@@ -1,9 +1,8 @@
 (* Test the lowlevel interface to the database.
  * Assumes that $PGHOST, etc. are set to point to a database.
- * $Id: test_pgocaml_lowlevel.ml,v 1.1 2006/07/19 10:21:38 rich Exp $
  *
  * PG'OCaml - type safe interface to PostgreSQL.
- * Copyright (C) 2005-2008 Richard Jones and other authors.
+ * Copyright (C) 2005-2009 Richard Jones and other authors.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public

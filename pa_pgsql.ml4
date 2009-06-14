@@ -1,8 +1,5 @@
-(* $Id: pa_pgsql.ml4,v 1.13 2007-09-03 17:18:38 rich Exp $
- * -*- tuareg-mode -*-
- *
- * PG'OCaml - type safe interface to PostgreSQL.
- * Copyright (C) 2005-2008 Richard Jones and other authors.
+(* PG'OCaml - type safe interface to PostgreSQL.
+ * Copyright (C) 2005-2009 Richard Jones and other authors.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
