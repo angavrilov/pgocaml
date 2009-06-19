@@ -1145,6 +1145,7 @@ let string_of_bytea b =
 
 let string_of_string (x : string) = x
 
+let oid_of_string = Int32.of_string
 let bool_of_string = function
   | "true" | "t" -> true
   | "false" | "f" -> false
