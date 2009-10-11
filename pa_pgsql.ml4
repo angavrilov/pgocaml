@@ -319,7 +319,7 @@ let pgsql_make_query_fct ~loc ~dbh ~split =
     >>)
 
 
-let pgsql_make_rq_body ~loc ~expr_f =
+let pgsql_make_rq_body ~loc ~expr_f ~core_line =
   expr_f <:expr<
       (* Get the hash table used to keep track of prepared statements. *)
       let hash =
@@ -340,7 +340,7 @@ let pgsql_make_rq_body ~loc ~expr_f =
 	}
         else ();
 	(* Execute the statement, returning the rows. *)
-	PGOCaml.execute_rev dbh ~name ~params ()
+	$core_line$
       }
     >>
 
@@ -438,7 +438,26 @@ let pgsql_wrap_result_cv ~loc ~my_dbh ~f_nullable_results ~results ~query ~expr 
       >>
 
 
-let pgsql_expand ?(flags = []) loc dbh query =
+let pgsql_wrap_prepare_f ~loc ~split core =
+  (* Create a prepared statement function wrapper *)
+  let patt =
+    List.fold_right (fun sentry tail ->
+      match sentry with
+      | `Text text ->
+        tail
+      | `Var (name, _, _) ->
+        <:patt< ~ $name$ >> :: tail
+    ) split
+      []
+  in
+  match patt with
+  | [] ->
+    <:expr< fun () -> $core$ >>
+  | lst ->
+    List.fold_right (fun p e -> <:expr< fun $pat:p$ -> $e$ >>) lst core
+
+
+let pgsql_expand ?(is_prepare = false) ?(flags = []) loc dbh query =
   let f_execute, f_nullable_results, key = pgsql_parse_flags ~loc ~flags in
 
   (* Connect, if necessary, to the database. *)
@@ -468,15 +487,42 @@ let pgsql_expand ?(flags = []) loc dbh query =
 
   let params = pgsql_make_param_cv ~loc ~my_dbh ~is_fixed ~params ~varmap in
 
-  let expr = pgsql_make_rq_body ~loc ~expr_f in
-  let expr = <:expr<
-      let dbh = $dbh$
-      and params = $params$
-      in $expr$
+  let core_line =
+    if is_prepare && is_fixed then <:expr< name >>
+    else <:expr< PGOCaml.execute_rev dbh ~name ~params () >>
+  in
+  let core_expr = pgsql_make_rq_body ~loc ~expr_f ~core_line in
+  let exec_expr =
+    if is_prepare && is_fixed then
+    <:expr<
+      let params = $params$ in (* type: string option list *)
+      PGOCaml.execute_rev dbh ~name:prepared_query_name ~params ()
+    >>
+    else
+    <:expr<
+      (* let original_query = $str:query$ in * original query string *)
+      let dbh = $dbh$ in
+      let params = $params$ in (* type: string option list list *)
+      $core_expr$
     >>
   in
+  let res_expr =
+    pgsql_wrap_result_cv ~loc ~my_dbh ~f_nullable_results
+                         ~results ~query ~expr:exec_expr
+  in
 
-  pgsql_wrap_result_cv ~loc ~my_dbh ~f_nullable_results ~results ~query ~expr
+  if is_prepare then
+    let eval_func = pgsql_wrap_prepare_f ~loc ~split res_expr in
+    if is_fixed then
+      <:expr<
+        let dbh = $dbh$ in
+        let prepared_query_name = $core_expr$ in
+        $eval_func$
+      >>
+    else
+      eval_func
+  else
+    res_expr
 
 
 
@@ -491,6 +537,14 @@ EXTEND Gram
 	  | [] -> assert false
 	  | query :: flags -> query, flags in
 	pgsql_expand ~flags loc dbh (Camlp4.Struct.Token.Eval.string query)
+    ] |
+    [ "PGPREPARE"; "("; dbh = expr; ")";
+      extras = LIST1 [ x = STRING -> x ] ->
+	let query, flags =
+	  match List.rev extras with
+	  | [] -> assert false
+	  | query :: flags -> query, flags in
+	pgsql_expand ~is_prepare:true ~flags loc dbh (Camlp4.Struct.Token.Eval.string query)
     ]
   ];
 END
