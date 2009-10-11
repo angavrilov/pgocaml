@@ -198,7 +198,7 @@ let pgsql_describe_query ~loc ~my_dbh ~split =
   ((params, results), varmap)
 
 
-let pgsql_make_param_cv ~loc ~my_dbh ~params ~varmap =
+let pgsql_make_param_cv ~loc ~my_dbh ~is_fixed ~params ~varmap =
   (* Generate a function for converting the parameters.
    *
    * See also:
@@ -210,6 +210,17 @@ let pgsql_make_param_cv ~loc ~my_dbh ~params ~varmap =
 	 let varname, list, option = List.assoc i varmap in
 	 let fn = "string_of_" ^ (unravel_type my_dbh param_type) in
 	 let head =
+	  (* ang: If the query has been folded, no need to make
+	          a list of lists and then flatten it *)
+	  if is_fixed then
+	     match list, option with
+	     | false, false ->
+	       <:expr< Some (PGOCaml.$lid:fn$ $lid:varname$) >>
+	     | false, true ->
+	       <:expr< Option.map PGOCaml.$lid:fn$ $lid:varname$ >>
+	     | _ ->
+	       assert false
+	  else
 	   match list, option with
 	   | false, false ->
 	     <:expr< [ Some (PGOCaml.$lid:fn$ $lid:varname$) ] >>
@@ -218,7 +229,8 @@ let pgsql_make_param_cv ~loc ~my_dbh ~params ~varmap =
 	   | true, false ->
 	     <:expr< List.map (fun x -> Some (PGOCaml.$lid:fn$ x)) $lid:varname$ >>
 	   | true, true ->
-	     <:expr< List.map (fun x -> Option.map PGOCaml.$lid:fn$ x) $lid:varname$ >> in
+	     <:expr< List.map (fun x -> Option.map PGOCaml.$lid:fn$ x) $lid:varname$ >>
+	 in
 	 <:expr< [ $head$ :: $tail$ ] >>
       )
       (List.combine (range 1 (1 + List.length varmap)) params)
@@ -227,9 +239,32 @@ let pgsql_make_param_cv ~loc ~my_dbh ~params ~varmap =
   params
 
 
-let pgsql_make_query_fct ~loc ~dbh ~params ~split =
-  (* Substitute expression. *)
-  let expr_f =
+let pgsql_make_query_fct ~loc ~dbh ~split =
+  (* ang: Fold the query as long as the parameter count is fixed *)
+  let split_head, split', split_i, split_j =
+    let rec optimize_split head split i j =
+        match split with
+        | [] ->
+            (head, [], i, j)
+        | `Text text :: tail ->
+            optimize_split (head^text) tail i j
+        | `Var (name, false, _) :: tail ->
+            optimize_split (head^"$"^(string_of_int (j+1))) tail (i+1) (j+1)
+        | `Var (name, true, _) :: _ ->
+            (head, split, i, j)
+    in
+      optimize_split "" split 0 0
+  in
+  (* ang: Handle the case when the query text is constant *)
+  if split' = [] then
+    let digest_str = "pa_pgsql." ^ Digest.to_hex (Digest.string split_head) in
+    (true, fun core -> <:expr<
+      let query = $str:split_head$
+      and name = $str:digest_str$
+      in
+      $core$
+    >>)
+  else  (* Substitute expression. *)
     let split = List.fold_right (
       fun s tail ->
 	let head = match s with
@@ -241,18 +276,16 @@ let pgsql_make_query_fct ~loc ~dbh ~params ~split =
 		if option then <:expr< True >> else <:expr< False >> in
 	      <:expr< `Var $str:varname$ $list$ $option$ >> in
 	<:expr< [ $head$ :: $tail$ ] >>
-    ) split <:expr< [] >> in
-    fun core -> <:expr<
+    ) (`Text split_head :: split') <:expr< [] >> in
+    (false, fun core -> <:expr<
       (* let original_query = $str:query$ in * original query string *)
-      let dbh = $dbh$ in
-      let params = $params$ in (* type: string option list list *)
       let split = $split$ in (* split up query *)
 
       (* Rebuild the query with appropriate placeholders.  A single list
        * param can expand into several placeholders.
        *)
-      let i = ref 0 in (* Counts parameters. *)
-      let j = ref 0 in (* Counts placeholders. *)
+      let i = ref $int: string_of_int split_i$ in (* Counts parameters. *)
+      let j = ref $int: string_of_int split_j$ in (* Counts placeholders. *)
       let query = String.concat "" (
 	List.map (
 	  fun
@@ -283,9 +316,7 @@ let pgsql_make_query_fct ~loc ~dbh ~params ~split =
       let name = "pa_pgsql." ^ Digest.to_hex (Digest.string query) in
 
       $core$
-    >>
-  in
-  expr_f
+    >>)
 
 
 let pgsql_make_rq_body ~loc ~expr_f =
@@ -433,10 +464,17 @@ let pgsql_expand ?(flags = []) loc dbh query =
 	       "Most likely your statement contains bare $, $number, etc.")
     );
 
-  let params = pgsql_make_param_cv ~loc ~my_dbh ~params ~varmap in
+  let is_fixed, expr_f = pgsql_make_query_fct ~loc ~dbh ~split in
 
-  let expr_f = pgsql_make_query_fct ~loc ~dbh ~params ~split in
+  let params = pgsql_make_param_cv ~loc ~my_dbh ~is_fixed ~params ~varmap in
+
   let expr = pgsql_make_rq_body ~loc ~expr_f in
+  let expr = <:expr<
+      let dbh = $dbh$
+      and params = $params$
+      in $expr$
+    >>
+  in
 
   pgsql_wrap_result_cv ~loc ~my_dbh ~f_nullable_results ~results ~query ~expr
 
