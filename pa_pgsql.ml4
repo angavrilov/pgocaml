@@ -98,7 +98,7 @@ let rec range a b =
 
 let rex = Pcre.regexp "\\$(@?)(\\??)([_a-z][_a-zA-Z0-9']*)"
 
-let pgsql_expand ?(flags = []) loc dbh query =
+let pgsql_parse_flags ~loc ~flags =
   (* Parse the flags. *)
   let f_execute = ref false in
   let f_nullable_results = ref false in
@@ -132,13 +132,10 @@ let pgsql_expand ?(flags = []) loc dbh query =
 	  Failure ("Unknown flag: " ^ str)
 	)
   ) flags;
-  let f_execute = !f_execute in
-  let f_nullable_results = !f_nullable_results in
-  let key = !key in
+  (!f_execute, !f_nullable_results, !key)
 
-  (* Connect, if necessary, to the database. *)
-  let my_dbh = get_connection key in
 
+let pgsql_split_query ~loc ~query =
   (* Split the query into text and variable name parts using Pcre.full_split.
    * eg. "select id from employees where name = $name and salary > $salary"
    * would become a structure equivalent to:
@@ -164,7 +161,10 @@ let pgsql_expand ?(flags = []) loc dbh query =
 	  )
     in
     loop split in
+  split
 
+
+let pgsql_describe_query ~loc ~my_dbh ~split =
   (* Go to the database, prepare this statement, and find out exactly
    * what the parameter types and return values are.  Exceptions can
    * be raised here if the statement is bad SQL.
@@ -195,23 +195,10 @@ let pgsql_expand ?(flags = []) loc dbh query =
       PGOCaml.describe_statement my_dbh (), varmap
     with
       exn -> Loc.raise loc exn in
+  ((params, results), varmap)
 
-  (* If the PGSQL(dbh) "execute" flag was used, we will actually
-   * execute the statement now.  Normally this would never be used, but
-   * some statements need to be executed, particularly CREATE TEMPORARY
-   * TABLE.
-   *)
-  if f_execute then ignore (PGOCaml.execute my_dbh ~params:[] ());
 
-  (* Number of params should match length of map, otherwise something
-   * has gone wrong in the substitution above.
-   *)
-  if List.length varmap <> List.length params then
-    Loc.raise loc (
-      Failure ("Mismatch in number of parameters found by database. " ^
-	       "Most likely your statement contains bare $, $number, etc.")
-    );
-
+let pgsql_make_param_cv ~loc ~my_dbh ~params ~varmap =
   (* Generate a function for converting the parameters.
    *
    * See also:
@@ -237,9 +224,12 @@ let pgsql_expand ?(flags = []) loc dbh query =
       (List.combine (range 1 (1 + List.length varmap)) params)
       <:expr< [] >>
   in
+  params
 
+
+let pgsql_make_query_fct ~loc ~dbh ~params ~split =
   (* Substitute expression. *)
-  let expr =
+  let expr_f =
     let split = List.fold_right (
       fun s tail ->
 	let head = match s with
@@ -252,7 +242,7 @@ let pgsql_expand ?(flags = []) loc dbh query =
 	      <:expr< `Var $str:varname$ $list$ $option$ >> in
 	<:expr< [ $head$ :: $tail$ ] >>
     ) split <:expr< [] >> in
-    <:expr<
+    fun core -> <:expr<
       (* let original_query = $str:query$ in * original query string *)
       let dbh = $dbh$ in
       let params = $params$ in (* type: string option list list *)
@@ -292,6 +282,14 @@ let pgsql_expand ?(flags = []) loc dbh query =
       (* Get a unique name for this query using an MD5 digest. *)
       let name = "pa_pgsql." ^ Digest.to_hex (Digest.string query) in
 
+      $core$
+    >>
+  in
+  expr_f
+
+
+let pgsql_make_rq_body ~loc ~expr_f =
+  expr_f <:expr<
       (* Get the hash table used to keep track of prepared statements. *)
       let hash =
 	try PGOCaml.private_data dbh
@@ -313,8 +311,10 @@ let pgsql_expand ?(flags = []) loc dbh query =
 	(* Execute the statement, returning the rows. *)
 	PGOCaml.execute_rev dbh ~name ~params ()
       }
-    >> in
+    >>
 
+
+let pgsql_wrap_result_cv ~loc ~my_dbh ~f_nullable_results ~results ~query ~expr =
   (* If we're expecting any result rows, then generate a function to
    * convert them.  Otherwise return unit.  Note that we can only
    * determine the nullability of results if they correspond to real
@@ -405,6 +405,42 @@ let pgsql_expand ?(flags = []) loc dbh query =
           ()
 	}
       >>
+
+
+let pgsql_expand ?(flags = []) loc dbh query =
+  let f_execute, f_nullable_results, key = pgsql_parse_flags ~loc ~flags in
+
+  (* Connect, if necessary, to the database. *)
+  let my_dbh = get_connection key in
+
+  let split = pgsql_split_query ~loc ~query in
+
+  let (params, results), varmap = pgsql_describe_query ~loc ~my_dbh ~split in
+
+  (* If the PGSQL(dbh) "execute" flag was used, we will actually
+   * execute the statement now.  Normally this would never be used, but
+   * some statements need to be executed, particularly CREATE TEMPORARY
+   * TABLE.
+   *)
+  if f_execute then ignore (PGOCaml.execute my_dbh ~params:[] ());
+
+  (* Number of params should match length of map, otherwise something
+   * has gone wrong in the substitution above.
+   *)
+  if List.length varmap <> List.length params then
+    Loc.raise loc (
+      Failure ("Mismatch in number of parameters found by database. " ^
+	       "Most likely your statement contains bare $, $number, etc.")
+    );
+
+  let params = pgsql_make_param_cv ~loc ~my_dbh ~params ~varmap in
+
+  let expr_f = pgsql_make_query_fct ~loc ~dbh ~params ~split in
+  let expr = pgsql_make_rq_body ~loc ~expr_f in
+
+  pgsql_wrap_result_cv ~loc ~my_dbh ~f_nullable_results ~results ~query ~expr
+
+
 
 open Syntax
 
