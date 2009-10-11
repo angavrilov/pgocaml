@@ -163,6 +163,12 @@ val close_portal : 'a t -> ?portal:string -> unit -> unit
 (** [close_portal conn ?portal ()] closes a portal and frees up any resources.
   *)
 
+val copy_from : 'a t -> query:string -> data_func:((string -> unit) -> unit) -> unit
+(** [copy_from conn ~query ~data_func] sends a COPY FROM statement to the server, 
+    then invokes data_func, giving it a callback to transfer data blocks, and finally
+    closes the copy mode.
+  *)
+  
 type row_description = result_description list
 and result_description = {
   name : string;			(** Field name. *)

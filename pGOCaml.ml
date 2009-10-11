@@ -181,6 +181,7 @@ type msg_t =
   | ParseComplete
   | ReadyForQuery of char
   | RowDescription of (string * int32 * int * int32 * int * int32 * int) list
+  | CopyInResponse of bool
   | UnknownMessage of char * string
 
 let string_of_msg_t = function
@@ -232,6 +233,8 @@ let string_of_msg_t = function
 	   (List.map (fun (name, table, col, oid, len, modifier, format) ->
 			sprintf "%s %ld %d %ld %d %ld %d"
 			  name table col oid len modifier format) fields))
+  | CopyInResponse is_binary ->
+      sprintf "CopyInResponse [%s]" (if is_binary then "binary" else "text")
   | UnknownMessage (typ, msg) ->
       sprintf "UnknownMessage %c, %S" typ msg
 
@@ -429,6 +432,10 @@ let parse_backend_message (typ, msg) =
 	done;
 	RowDescription (List.rev !fields)
 
+    | 'G' ->
+    let mode = get_byte "copy mode" in
+    CopyInResponse (mode <> 0)
+    
     | 't' ->
 	let nr_fields = get_int16 () in
 	let fields = ref [] in
@@ -891,6 +898,93 @@ let rollback conn =
   prepare conn ~query ();
   ignore (execute conn ~params:[] ())
 
+
+let copy_from conn ~query ~data_func =
+  let do_execute () =
+    (* Bind *)
+    let msg = new_message 'Q' in
+    add_string msg query;
+    send_message conn msg;
+
+    (* Process the message(s) received from the database until the server
+       notifies it's ready to receive data
+     *)
+    let rec wait_copyin_loop () =
+      (* NB: receive_message flushes the output connection. *)
+      let msg = receive_message conn in
+      let msg = parse_backend_message msg in
+      match msg with
+      | CopyInResponse _ -> ()  (* Ready to receive data *)
+      | ReadyForQuery _ -> raise (Error "Not a COPY FROM statement in copy_from")
+      | ErrorResponse err -> pg_error ~conn err (* Error *)
+      | NoticeResponse _ 
+      | BindComplete
+      | CommandComplete _
+      | EmptyQueryResponse
+      | DataRow _
+      | RowDescription _
+      | NoData 
+      | ParameterStatus _ -> wait_copyin_loop ()
+      | _ ->
+	  raise
+	    (Error ("PGOCaml: unexpected response message in copy_from: " ^
+		      string_of_msg_t msg))
+    in
+    wait_copyin_loop ();
+
+    let () = 
+        try
+          let () = data_func 
+            (fun buffer ->
+              let msg = new_message 'd' in
+              add_string_no_trailing_nil msg buffer;
+              send_message conn msg)
+          in
+              
+          let msg = new_message 'c' in
+          send_message conn msg;
+      
+        with
+        | x ->
+            let msg = new_message 'f' in
+            add_string msg (Printexc.to_string x);
+            send_message conn msg;
+            let rec loop () =
+                let msg = receive_message conn in
+                let msg = parse_backend_message msg in
+                match msg with ReadyForQuery _ -> () | _ -> loop ()
+            in
+            loop ();
+            raise x
+    in
+    let rec wait_complete_loop () =
+      let msg = receive_message conn in
+      let msg = parse_backend_message msg in
+      match msg with
+      | ReadyForQuery _ -> () (* Done *)
+      | ErrorResponse err -> pg_error ~conn err (* Error *)
+      | NoticeResponse _ 
+      | BindComplete
+      | CommandComplete _
+      | EmptyQueryResponse
+      | NoData 
+      | ParameterStatus _ -> wait_complete_loop ()
+      | _ ->
+      raise
+        (Error ("PGOCaml: unexpected response message: " ^
+              string_of_msg_t msg))
+    in
+    wait_complete_loop ()
+  in
+  (* We used to append the parameters here, but that leads to
+   * problems with parsing, and may leak sensitive data.  In any
+   * case the profiling program doesn't care about the actual
+   * parameters.
+   *)
+  let details = [ "query"; query;] in
+  profile_op conn.uuid "copy_from" details do_execute
+  
+  
 let serial conn name =
   let query = "select currval ($1)" in
   prepare conn ~query ();

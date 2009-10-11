@@ -109,6 +109,29 @@ let () =
   ignore (PGOCaml.execute dbh
 	    ~params:[Some "Mary"; Some "30000.00"; None] ());
 
+  PGOCaml.copy_from dbh
+    ~query:"COPY employees (name,salary,email) FROM STDIN WITH NULL '?' DELIMITER '|'"
+    ~data_func:(fun send ->
+        send "BatchMan1|101|?\n";
+        send "BatchMan2|102|?\n";
+        send "BatchMan3|103|foobar\n";
+        send "BatchMan4|104|??\n";
+    );
+  
+  (try 
+      PGOCaml.copy_from dbh
+        ~query:"SELECT * FROM employees"
+        ~data_func:(fun _ -> assert false)
+   with 
+   | x -> Printf.printf "Expected error: %s\n" (Printexc.to_string x));
+  
+  (try 
+      PGOCaml.copy_from dbh
+        ~query:"COPY employees FROM STDIN"
+        ~data_func:(fun _ -> failwith "test")
+   with 
+   | x -> Printf.printf "Expected error: %s\n" (Printexc.to_string x));
+  
   let query = "select * from employees where salary > $1 order by id" in
   ignore (PGOCaml.prepare dbh ~query ());
   let params, results = PGOCaml.describe_statement dbh () in
