@@ -101,6 +101,7 @@ let rex = Pcre.regexp "\\$(@?)(\\??)([_a-z][_a-zA-Z0-9']*)"
 let pgsql_parse_flags ~loc ~flags =
   (* Parse the flags. *)
   let f_execute = ref false in
+  let f_opt_args = ref false in
   let f_nullable_results = ref false in
   let key = ref { host = None; port = None; user = None;
 		  password = None; database = None;
@@ -108,6 +109,7 @@ let pgsql_parse_flags ~loc ~flags =
   List.iter (
     function
     | "execute" -> f_execute := true
+    | "opt-args" -> f_opt_args := true
     | "nullable-results" -> f_nullable_results := true
     | str when String.starts_with str "host=" ->
 	let host = String.sub str 5 (String.length str - 5) in
@@ -132,7 +134,7 @@ let pgsql_parse_flags ~loc ~flags =
 	  Failure ("Unknown flag: " ^ str)
 	)
   ) flags;
-  (!f_execute, !f_nullable_results, !key)
+  (!f_execute, !f_opt_args, !f_nullable_results, !key)
 
 
 let pgsql_split_query ~loc ~query =
@@ -438,19 +440,24 @@ let pgsql_wrap_result_cv ~loc ~my_dbh ~f_nullable_results ~results ~query ~expr 
       >>
 
 
-let pgsql_wrap_prepare_f ~loc ~split core =
+let pgsql_wrap_prepare_f ~loc ~f_opt_args ~split core =
   (* Create a prepared statement function wrapper *)
-  let patt =
-    List.fold_right (fun sentry tail ->
+  let patt_t_base =
+    if f_opt_args then <:patt< () >>::[]
+    else []
+  in
+  let patt_h, patt_t =
+    List.fold_right (fun sentry (pre_tail, tail) ->
       match sentry with
       | `Text text ->
-        tail
+	(pre_tail, tail)
+      | `Var (name, _, true) when f_opt_args ->
+	(<:patt< ? $name$ >> :: pre_tail, tail)
       | `Var (name, _, _) ->
-        <:patt< ~ $name$ >> :: tail
-    ) split
-      []
+	(pre_tail, <:patt< ~ $name$ >> :: tail)
+    ) split ([], patt_t_base)
   in
-  match patt with
+  match (patt_h @ patt_t) with
   | [] ->
     <:expr< fun () -> $core$ >>
   | lst ->
@@ -458,7 +465,7 @@ let pgsql_wrap_prepare_f ~loc ~split core =
 
 
 let pgsql_expand ?(is_prepare = false) ?(flags = []) loc dbh query =
-  let f_execute, f_nullable_results, key = pgsql_parse_flags ~loc ~flags in
+  let f_execute, f_opt_args, f_nullable_results, key = pgsql_parse_flags ~loc ~flags in
 
   (* Connect, if necessary, to the database. *)
   let my_dbh = get_connection key in
@@ -512,7 +519,7 @@ let pgsql_expand ?(is_prepare = false) ?(flags = []) loc dbh query =
   in
 
   if is_prepare then
-    let eval_func = pgsql_wrap_prepare_f ~loc ~split res_expr in
+    let eval_func = pgsql_wrap_prepare_f ~loc ~f_opt_args ~split res_expr in
     if is_fixed then
       <:expr<
         let dbh = $dbh$ in

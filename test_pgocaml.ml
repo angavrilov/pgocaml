@@ -31,14 +31,15 @@ let () =
      email text
   )";
 
-  let insert name salary email =
-    PGSQL(dbh) "insert into employees (name, salary, email)
-                values ($name, $salary, $?email)"
+  let insert =
+    PGPREPARE(dbh) "opt-args"
+    "insert into employees (name, salary, email)
+     values ($name, $salary, $?email)"
   in
-  insert "Ann" 10_000_l None;
-  insert "Bob" 45_000_l None;
-  insert "Jim" 20_000_l None;
-  insert "Mary" 30_000_l (Some "mary@example.com");
+  insert "Ann" 10_000_l ();
+  insert "Bob" 45_000_l ();
+  insert "Jim" 20_000_l ();
+  insert ~name:"Mary" ~salary:30_000_l ~email:"mary@example.com" ();
 
   let rows = PGSQL(dbh) "select id, name, salary, email from employees" in
   List.iter (
